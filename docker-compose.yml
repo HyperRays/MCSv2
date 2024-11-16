@@ -1,0 +1,21 @@
+services:
+  minecraft:
+    build:
+      context: ./mcs
+      dockerfile: Dockerfile
+      args:
+        version: 1.21.1
+        server_dir: ./server
+      secrets:
+        - source: rcon_password
+          target: rcon_password
+    ports:
+      - "25565:25565"
+    secrets:
+      - rcon_password
+    command: --commands ../commands.txt
+
+secrets:
+  rcon_password:
+    file: ./mcs/password.txt
+

@@ -6,9 +6,11 @@ RUN echo "https://apk.corretto.aws/" >> /etc/apk/repositories
 
 # Update package list and install dependencies
 RUN apk update
-RUN apk add amazon-corretto-17
+RUN apk add amazon-corretto-21
 RUN apk add python3
 RUN apk add py3-requests
+RUN apk add py3-packaging
+RUN apk add bash  # Ensure bash is installed
 
 # Define build arguments
 ARG version
@@ -26,4 +28,6 @@ RUN --mount=type=secret,id=rcon_password,required=true \
 RUN rm -rf /var/cache/apk/*
 
 # Define an ENTRYPOINT to allow CLI interaction
-ENTRYPOINT ["/bin/bash"]
+WORKDIR /app/${server_dir}
+ENTRYPOINT ["python", "orchestrator.py", "." ,"--non-interactive"]
+# ENTRYPOINT [ "/bin/bash" ]

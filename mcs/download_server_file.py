@@ -1,48 +1,21 @@
 import argparse
 import requests
-import itertools
 import sys
 import os
+from packaging import version as packaging_version
 
-def batched_it(iterable, n):
-    """Batch data into iterators of length n. The last batch may be shorter."""
-    if n < 1:
-        raise ValueError('n must be at least one')
-    it = iter(iterable)
-    while True:
-        chunk_it = itertools.islice(it, n)
-        try:
-            first_el = next(chunk_it)
-        except StopIteration:
-            return
-        yield itertools.chain((first_el,), chunk_it)
+BASE_URL = "https://api.papermc.io/v2/projects/paper/"
 
-# Endpoints to retrieve versions and builds
-versions_endpoint = lambda: "https://api.papermc.io/v2/projects/paper/"
-builds_endpoint = lambda version: f"{versions_endpoint()}versions/{version}/builds/"
-downloads_endpoint = lambda version, build, file_name: f"{builds_endpoint(version)}{build}/downloads/{file_name}"
+def versions_endpoint():
+    return BASE_URL
 
-def only_experimental(version):
-    """Check if all builds of a version are experimental."""
-    try:
-        r = requests.get(builds_endpoint(version))
-        r.raise_for_status()
-        properties = r.json()
-        return all(map(lambda v: v["channel"] == "experimental", properties["builds"]))
-    except requests.RequestException as e:
-        print(f"Failed to check experimental status for version {version}: {e}")
-        sys.exit(1)
+def builds_endpoint(version):
+    return f"{BASE_URL}versions/{version}/builds/"
 
-def get_non_experimental_builds(version):
-    """Get non-experimental builds for a given version."""
-    try:
-        r = requests.get(builds_endpoint(version))
-        r.raise_for_status()
-        properties = r.json()
-        return list(filter(lambda v: v["channel"] != "experimental", properties["builds"]))
-    except requests.RequestException as e:
-        print(f"Failed to retrieve builds for version {version}: {e}")
-        sys.exit(1)
+def downloads_endpoint(version, build, file_name):
+    return f"{builds_endpoint(version)}{build}/downloads/{file_name}"
+
+builds_cache = {}
 
 def get_versions_available():
     """Retrieve all available versions."""
@@ -55,10 +28,38 @@ def get_versions_available():
         print(f"Failed to retrieve versions: {e}")
         sys.exit(1)
 
+def get_builds(version):
+    """Get builds for a given version, with caching."""
+    if version in builds_cache:
+        return builds_cache[version]
+    try:
+        r = requests.get(builds_endpoint(version))
+        r.raise_for_status()
+        properties = r.json()
+        builds_cache[version] = properties["builds"]
+        return builds_cache[version]
+    except requests.RequestException as e:
+        print(f"Failed to retrieve builds for version {version}: {e}")
+        sys.exit(1)
+
+def only_experimental(version):
+    """Check if all builds of a version are experimental."""
+    builds = get_builds(version)
+    return all(build["channel"] == "experimental" for build in builds)
+
+def get_non_experimental_builds(version):
+    """Get non-experimental builds for a given version."""
+    builds = get_builds(version)
+    return [build for build in builds if build["channel"] != "experimental"]
+
 def check_for_stable():
     """Check for stable versions."""
     versions = get_versions_available()
-    return dict(zip(versions, map(only_experimental, versions)))
+    stable_versions = {}
+    for version in versions:
+        is_stable = not only_experimental(version)
+        stable_versions[version] = is_stable
+    return stable_versions
 
 def download_file(url, download_folder):
     """Download a file from a URL to a specified folder."""
@@ -74,80 +75,38 @@ def download_file(url, download_folder):
                     if chunk:
                         f.write(chunk)
         print(f"Downloaded {local_filename} to {download_path}")
-        return download_path
+        return local_filename
     except requests.RequestException as e:
         print(f"Failed to download file from {url}: {e}")
         sys.exit(1)
 
-def parse_version_format(version):
-    """Parse version format into a tuple, handling 'pre' identifiers properly."""
-    parsed_version = []
-    for part in version.split('.'):
-        if '-' in part:
-            numeric_part, pre_release_part = part.split('-')
-            parsed_version.append(int(numeric_part) if numeric_part.isdigit() else numeric_part)
-            text_part = "".join(filter(lambda v: not v.isdigit(), pre_release_part))
-            version_part = int("".join(filter(str.isdigit, pre_release_part)))
-            parsed_version.append((text_part, version_part))
-        else:
-            parsed_version.append(int(part) if part.isdigit() else part)
-    return tuple(parsed_version)
-
-def parse_version_format_int(version):
-    """Parse version format into an integer format."""
-    parsed_version = []
-    for part in version.split('.'):
-        if '-' in part:
-            numeric_part, pre_release_part = part.split('-')
-            parsed_version.append(int(numeric_part) if numeric_part.isdigit() else numeric_part)
-            text_part = "".join(filter(lambda v: not v.isdigit(), pre_release_part))
-            version_part = int("".join(filter(str.isdigit, pre_release_part)))
-            if text_part == "rc":
-                version_part = 2 + 1/version_part
-            elif text_part == "pre":
-                version_part = 1 + 1/version_part
-            else:
-                version_part = 3 + 1/version_part
-            parsed_version.append(version_part)
-        else:
-            parsed_version.append(int(part) if part.isdigit() else part)
-    
-    version_int = 0
-    for i, ver in enumerate(reversed(parsed_version)):
-        multiple = 10000**i
-        version_int += ver * multiple
-
-    return version_int
+def batched_it(iterable, n):
+    """Batch data into lists of length n. The last batch may be shorter."""
+    for i in range(0, len(iterable), n):
+        yield iterable[i:i + n]
 
 def query_version_infos():
     """Generate a formatted list of stable versions."""
+    stable_versions = [version for version, is_stable in check_for_stable().items() if is_stable]
+    stable_versions_sorted = sorted(stable_versions, key=packaging_version.parse, reverse=True)
     log_str = "[Stable Versions]\n"
-    latest_stable_versions = sorted(
-        [v for v, is_experimental in check_for_stable().items() if not is_experimental],
-        key=parse_version_format_int,
-        reverse=True
-    )
-    log_str += ",\n".join(map(lambda v: ", ".join(v), batched_it(latest_stable_versions, 7)))
+    for batch in batched_it(stable_versions_sorted, 7):
+        log_str += ", ".join(batch) + "\n"
     print(log_str)
 
 def main(version, folder):
     """Main function to check for latest version, get build, and download."""
-    latest_stable_versions = sorted(
-        [v for v, is_experimental in check_for_stable().items() if not is_experimental],
-        key=parse_version_format_int,
-        reverse=True
-    )
-
-    if version not in latest_stable_versions:
+    stable_versions = [v for v, is_stable in check_for_stable().items() if is_stable]
+    if version not in stable_versions:
         print(f"Error: Version {version} is not stable or does not exist.")
         sys.exit(1)
-
+    
     builds = get_non_experimental_builds(version)
     if not builds:
         print(f"Error: No non-experimental builds found for version {version}.")
         sys.exit(1)
-
-    selected_build = builds[-1]
+    
+    selected_build = builds[-1]  # Assuming the last build is the latest
     build_no = selected_build["build"]
     build_file = selected_build["downloads"]["application"]["name"]
     download_url = downloads_endpoint(version, build_no, build_file)
@@ -167,5 +126,4 @@ if __name__ == "__main__":
         if not args.version:
             print("Error: The --version argument is required for the 'download' command.")
             sys.exit(1)
-        _ = main(args.version, args.folder)
-
+        main(args.version, args.folder)
